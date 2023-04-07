@@ -109,7 +109,7 @@ static void updateBoundary(double *u, int ldu) {
 			V(u, i, N_loc+1) = V(u, i, 1);
 		}
 	} else {
-		// FIXME: With Q > 1, the error rates go from Xe-06 to Xe-01. Need to fix the errors.
+		// FIXME: With Q > 1, the error rates go from e-06 to e-01. Might have to do with data type? Need to fix the errors.
 		int leftProc = mod(Q0 + 1, Q) + (P0 * Q);
 		int rightProc = mod(Q0 - 1, Q) + (P0 * Q);
 #ifndef HALO_NON_BLOCKING
@@ -180,9 +180,8 @@ void parAdvectOverlap(int reps, double *u, int ldu) {
 				V(u, M_loc+1, j) = V(u, 1, j);      
 			}
 		} else {
-			// TODO: Fix this indexing. Should convert rank into (x,y) coords and then calc the rank of top/bottom procs
-			int topProc = P0 + (((Q0 + 1) % Q) * P);
-			int botProc = P0 + (((Q0 - 1) % Q) * P);
+			int topProc = Q0 + (mod(P0 + 1, P) * Q);
+			int botProc = Q0 + (mod(P0 - 1, P) * Q);
 			MPI_Irecv(&V(u, 0, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG, comm, &requests[0]);
 			MPI_Irecv(&V(u, M_loc+1, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG, comm, &requests[1]);
 			MPI_Isend(&V(u, M_loc, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG, comm, &requests[2]);
@@ -196,8 +195,8 @@ void parAdvectOverlap(int reps, double *u, int ldu) {
 				V(u, i, N_loc+1) = V(u, i, 1);
 			}
 		} else {
-			int leftProc = ((P0 + 1) % P) + (Q0 * P);
-			int rightProc = ((P0 - 1) % P) + (Q0 * P);
+			int leftProc = mod(Q0 + 1, Q) + (P0 * Q);
+			int rightProc = mod(Q0 - 1, Q) + (P0 * Q);
 			MPI_Irecv(&V(u, 1, N_loc + 1), 1, colType, rightProc, HALO_TAG, comm, &requests[offset + 0]);
 			MPI_Irecv(&V(u, 1, 0), 1, colType, leftProc, HALO_TAG, comm, &requests[offset + 1]);
 			MPI_Isend(&V(u, 1, 1), 1, colType, leftProc, HALO_TAG, comm, &requests[offset + 2]);
