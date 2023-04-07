@@ -69,7 +69,6 @@ static void updateBoundary(double *u, int ldu) {
 
 	//top and bottom halo 
 	//note: we get the left/right neighbour's corner elements from each end
-	// TODO: Fix the indexing in V(u, x, y) to match the top/bottom/left/right send recieves
 #ifdef HALO_NON_BLOCKING
 	MPI_Request requests[8];
 	int offset = 0;
@@ -110,6 +109,7 @@ static void updateBoundary(double *u, int ldu) {
 			V(u, i, N_loc+1) = V(u, i, 1);
 		}
 	} else {
+		// FIXME: With Q > 1, the error rates go from Xe-06 to Xe-01. Need to fix the errors.
 		int leftProc = mod(Q0 + 1, Q) + (P0 * Q);
 		int rightProc = mod(Q0 - 1, Q) + (P0 * Q);
 #ifndef HALO_NON_BLOCKING
