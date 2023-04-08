@@ -98,8 +98,7 @@ static void updateBoundary(double *u, int ldu) {
 		MPI_Irecv(&V(u, M_loc+1, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG, comm, &requests[1]);
 		MPI_Isend(&V(u, M_loc, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG, comm, &requests[2]);
 		MPI_Isend(&V(u, 1, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG, comm, &requests[3]);
-		MPI_Waitall(4, requests, NULL);
-		offset = 0;//4;
+		offset = 4;
 #endif
 	}
 	// left and right sides of halo
@@ -129,9 +128,11 @@ static void updateBoundary(double *u, int ldu) {
 		MPI_Irecv(&V(u, 1, 0), 1, colType, leftProc, HALO_TAG, comm, &requests[offset + 1]);
 		MPI_Isend(&V(u, 1, 1), 1, colType, leftProc, HALO_TAG, comm, &requests[offset + 2]);
 		MPI_Isend(&V(u, 1, N_loc), 1, colType, rightProc, HALO_TAG, comm, &requests[offset + 3]);
-		MPI_Waitall(4, requests, NULL);
 #endif
 	}
+#ifdef HALO_NON_BLOCKING
+	MPI_Waitall(4 + offset, requests, NULL);
+#endif
 } //updateBoundary()
 
 
@@ -171,8 +172,9 @@ void parAdvectOverlap(int reps, double *u, int ldu) {
 	assert(v != NULL);
 	assert(ldu == N_loc + 2);
 
-	// NOTE: Next send/recv updates
 	for (int r = 0; r < reps; r++) {
+		// NOTE: Next send/recv updates
+
 		// Top and bottom of halo
 		if (P == 1) {
 			for (int j = 1; j < N_loc+1; j++) {
