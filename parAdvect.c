@@ -82,17 +82,16 @@ static void updateBoundary(double *u, int ldu) {
 		int topProc = Q0 + (mod(P0 + 1, P) * Q);
 		int botProc = Q0 + (mod(P0 - 1, P) * Q);
 #ifndef HALO_NON_BLOCKING
-		if (rank % 2 == 0) {
-			MPI_Recv(&V(u, 0, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG, comm, MPI_STATUS_IGNORE);
-			MPI_Send(&V(u, M_loc, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG, comm);
-			MPI_Recv(&V(u, M_loc+1, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG, comm, MPI_STATUS_IGNORE);
-			MPI_Send(&V(u, 1, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG, comm);
-		} else {
-			MPI_Send(&V(u, M_loc, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG, comm);
-			MPI_Recv(&V(u, 0, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG, comm, MPI_STATUS_IGNORE);
-			MPI_Send(&V(u, 1, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG, comm);
-			MPI_Recv(&V(u, M_loc+1, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG, comm, MPI_STATUS_IGNORE);
-		}
+		MPI_Sendrecv(
+			&V(u, M_loc, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG,
+			&V(u, 0, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG,
+			comm, MPI_STATUS_IGNORE
+		);
+		MPI_Sendrecv(
+			&V(u, 1, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG,
+			&V(u, M_loc + 1, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG,
+			comm, MPI_STATUS_IGNORE
+		);
 #else
 		MPI_Irecv(&V(u, 0, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG, comm, &requests[0]);
 		MPI_Irecv(&V(u, M_loc+1, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG, comm, &requests[1]);
@@ -112,17 +111,16 @@ static void updateBoundary(double *u, int ldu) {
 		int leftProc = mod(Q0 + 1, Q) + (P0 * Q);
 		int rightProc = mod(Q0 - 1, Q) + (P0 * Q);
 #ifndef HALO_NON_BLOCKING
-		if (rank % 2 == 0) {
-			MPI_Recv(&V(u, 1, N_loc + 1), 1, colType, rightProc, HALO_TAG, comm, MPI_STATUS_IGNORE);
-			MPI_Send(&V(u, 1, 1), 1, colType, leftProc, HALO_TAG, comm);
-			MPI_Recv(&V(u, 1, 0), 1, colType, leftProc, HALO_TAG, comm, MPI_STATUS_IGNORE);
-			MPI_Send(&V(u, 1, N_loc), 1, colType, rightProc, HALO_TAG, comm);
-		} else {
-			MPI_Send(&V(u, 1, 1), 1, colType, leftProc, HALO_TAG, comm);
-			MPI_Recv(&V(u, 1, N_loc + 1), 1, colType, rightProc, HALO_TAG, comm, MPI_STATUS_IGNORE);
-			MPI_Send(&V(u, 1, N_loc), 1, colType, rightProc, HALO_TAG, comm);
-			MPI_Recv(&V(u, 1, 0), 1, colType, leftProc, HALO_TAG, comm, MPI_STATUS_IGNORE);
-		}
+		MPI_Sendrecv(
+			&V(u, 1, 1), 1, colType, leftProc, HALO_TAG,
+			&V(u, 1, N_loc + 1), 1, colType, rightProc, HALO_TAG,
+			comm, MPI_STATUS_IGNORE
+		);
+		MPI_Sendrecv(
+			&V(u, 1, N_loc), 1, colType, rightProc, HALO_TAG,
+			&V(u, 1, 0), 1, colType, leftProc, HALO_TAG,
+			comm, MPI_STATUS_IGNORE
+		);
 #else
 		MPI_Irecv(&V(u, 1, N_loc + 1), 1, colType, rightProc, HALO_TAG, comm, &requests[offset + 0]);
 		MPI_Irecv(&V(u, 1, 0), 1, colType, leftProc, HALO_TAG, comm, &requests[offset + 1]);
