@@ -11,6 +11,7 @@
 
 #define HALO_TAG 100
 #define HALO_NON_BLOCKING
+#define CARTESIAN_HANDLERS
 
 int M_loc, N_loc; // local advection field size (excluding halo) 
 int M0, N0;       // local field element (0,0) is global element (M0,N0)
@@ -20,6 +21,7 @@ static int M, N, P, Q; // local store of problem parameters
 static int verbosity;
 static int rank, nprocs;       // MPI values
 static MPI_Comm comm;
+static MPI_Comm commHandle;
 static MPI_Datatype rowType;
 static MPI_Datatype colType;
 
@@ -44,6 +46,14 @@ void initParParams(int M_, int N_, int P_, int Q_, int verb) {
 	MPI_Type_vector(N_loc, 1, M_loc, MPI_DOUBLE, &colType);
 	MPI_Type_commit(&rowType);
 	MPI_Type_commit(&colType);
+
+#ifdef CARTESIAN_HANDLERS
+	int dimSize[2] = { P, Q };
+	int periodicity[2] = { 1, 1 };
+	MPI_Cart_create(comm, 2, dimSize, periodicity, 1, &commHandle);
+#else
+	commHandle = comm;
+#endif
 } //initParParams()
 
 
@@ -79,24 +89,30 @@ static void updateBoundary(double *u, int ldu) {
 			V(u, M_loc+1, j) = V(u, 1, j);      
 		}
 	} else {
+#ifdef CARTESIAN_HANDLERS
+		int topProc;
+		int botProc;
+		MPI_Cart_shift(commHandle, 0, 1, &topProc, &botProc);
+#else
 		int topProc = Q0 + (mod(P0 + 1, P) * Q);
 		int botProc = Q0 + (mod(P0 - 1, P) * Q);
+#endif
 #ifndef HALO_NON_BLOCKING
 		MPI_Sendrecv(
 			&V(u, M_loc, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG,
 			&V(u, 0, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG,
-			comm, MPI_STATUS_IGNORE
+			commHandle, MPI_STATUS_IGNORE
 		);
 		MPI_Sendrecv(
 			&V(u, 1, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG,
 			&V(u, M_loc + 1, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG,
-			comm, MPI_STATUS_IGNORE
+			commHandle, MPI_STATUS_IGNORE
 		);
 #else
-		MPI_Irecv(&V(u, 0, 1), 1, rowType, botProc, HALO_TAG, comm, &requests[0]);
-		MPI_Irecv(&V(u, M_loc+1, 1), 1, rowType, topProc, HALO_TAG, comm, &requests[1]);
-		MPI_Isend(&V(u, M_loc, 1), 1, rowType, topProc, HALO_TAG, comm, &requests[2]);
-		MPI_Isend(&V(u, 1, 1), 1, rowType, botProc, HALO_TAG, comm, &requests[3]);
+		MPI_Irecv(&V(u, 0, 1), 1, rowType, botProc, HALO_TAG, commHandle, &requests[0]);
+		MPI_Irecv(&V(u, M_loc+1, 1), 1, rowType, topProc, HALO_TAG, commHandle, &requests[1]);
+		MPI_Isend(&V(u, M_loc, 1), 1, rowType, topProc, HALO_TAG, commHandle, &requests[2]);
+		MPI_Isend(&V(u, 1, 1), 1, rowType, botProc, HALO_TAG, commHandle, &requests[3]);
 		offset = 4;
 #endif
 	}
@@ -108,24 +124,30 @@ static void updateBoundary(double *u, int ldu) {
 		}
 	} else {
 		// FIXME: With Q > 1, the error rates go from e-06 to e-01. Might have to do with data type? Need to fix the errors.
+#ifdef CARTESIAN_HANDLERS	
+		int leftProc;
+		int rightProc;
+		MPI_Cart_shift(commHandle, 1, 1, &leftProc, &rightProc);
+#else
 		int leftProc = mod(Q0 + 1, Q) + (P0 * Q);
 		int rightProc = mod(Q0 - 1, Q) + (P0 * Q);
+#endif
 #ifndef HALO_NON_BLOCKING
 		MPI_Sendrecv(
 			&V(u, 1, 1), 1, colType, leftProc, HALO_TAG,
 			&V(u, 1, N_loc + 1), 1, colType, rightProc, HALO_TAG,
-			comm, MPI_STATUS_IGNORE
+			commHandle, MPI_STATUS_IGNORE
 		);
 		MPI_Sendrecv(
 			&V(u, 1, N_loc), 1, colType, rightProc, HALO_TAG,
 			&V(u, 1, 0), 1, colType, leftProc, HALO_TAG,
-			comm, MPI_STATUS_IGNORE
+			commHandle, MPI_STATUS_IGNORE
 		);
 #else
-		MPI_Irecv(&V(u, 1, N_loc + 1), 1, colType, rightProc, HALO_TAG, comm, &requests[offset + 0]);
-		MPI_Irecv(&V(u, 1, 0), 1, colType, leftProc, HALO_TAG, comm, &requests[offset + 1]);
-		MPI_Isend(&V(u, 1, 1), 1, colType, leftProc, HALO_TAG, comm, &requests[offset + 2]);
-		MPI_Isend(&V(u, 1, N_loc), 1, colType, rightProc, HALO_TAG, comm, &requests[offset + 3]);
+		MPI_Irecv(&V(u, 1, N_loc + 1), 1, colType, rightProc, HALO_TAG, commHandle, &requests[offset + 0]);
+		MPI_Irecv(&V(u, 1, 0), 1, colType, leftProc, HALO_TAG, commHandle, &requests[offset + 1]);
+		MPI_Isend(&V(u, 1, 1), 1, colType, leftProc, HALO_TAG, commHandle, &requests[offset + 2]);
+		MPI_Isend(&V(u, 1, N_loc), 1, colType, rightProc, HALO_TAG, commHandle, &requests[offset + 3]);
 #endif
 	}
 #ifdef HALO_NON_BLOCKING
