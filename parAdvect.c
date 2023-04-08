@@ -93,10 +93,10 @@ static void updateBoundary(double *u, int ldu) {
 			comm, MPI_STATUS_IGNORE
 		);
 #else
-		MPI_Irecv(&V(u, 0, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG, comm, &requests[0]);
-		MPI_Irecv(&V(u, M_loc+1, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG, comm, &requests[1]);
-		MPI_Isend(&V(u, M_loc, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG, comm, &requests[2]);
-		MPI_Isend(&V(u, 1, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG, comm, &requests[3]);
+		MPI_Irecv(&V(u, 0, 1), 1, rowType, botProc, HALO_TAG, comm, &requests[0]);
+		MPI_Irecv(&V(u, M_loc+1, 1), 1, rowType, topProc, HALO_TAG, comm, &requests[1]);
+		MPI_Isend(&V(u, M_loc, 1), 1, rowType, topProc, HALO_TAG, comm, &requests[2]);
+		MPI_Isend(&V(u, 1, 1), 1, rowType, botProc, HALO_TAG, comm, &requests[3]);
 		offset = 4;
 #endif
 	}
