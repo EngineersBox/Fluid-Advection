@@ -267,20 +267,20 @@ static void updateBoundaryWide(double *u, int ldu, int haloWidth) {
 #endif
 #ifndef HALO_NON_BLOCKING
 		MPI_Sendrecv(
-			&V(u, M_loc - haloWidth, 1), 1, rowType, topProc, HALO_TAG,
+			&V(u, M_loc, 1), 1, rowType, topProc, HALO_TAG,
 			&V(u, 0, 1), 1, rowType, botProc, HALO_TAG,
 			commHandle, MPI_STATUS_IGNORE
 		);
 		MPI_Sendrecv(
-			&V(u, haloWidth, 1), 1, rowType, botProc, HALO_TAG,
+			&V(u, 1, 1), 1, rowType, botProc, HALO_TAG,
 			&V(u, M_loc + 1, 1), 1, rowType, topProc, HALO_TAG,
 			commHandle, MPI_STATUS_IGNORE
 		);
 #else
-		MPI_Irecv(&V(u, 0, 1), 1, rowType, botProc, HALO_TAG, commHandle, &requests[0]);
-		MPI_Irecv(&V(u, M_loc+1, 1), 1, rowType, topProc, HALO_TAG, commHandle, &requests[1]);
-		MPI_Isend(&V(u, M_loc - haloWidth, 1), 1, rowType, topProc, HALO_TAG, commHandle, &requests[2]);
-		MPI_Isend(&V(u, haloWidth, 1), 1, rowType, botProc, HALO_TAG, commHandle, &requests[3]);
+		MPI_Irecv(&V(u, haloWidth, haloWidth), 1, rowType, botProc, HALO_TAG, commHandle, &requests[0]);
+		MPI_Irecv(&V(u, M_loc + (haloWidth * 2), haloWidth), 1, rowType, topProc, HALO_TAG, commHandle, &requests[1]);
+		MPI_Isend(&V(u, M_loc, haloWidth), 1, rowType, topProc, HALO_TAG, commHandle, &requests[2]);
+		MPI_Isend(&V(u, (haloWidth * 2), haloWidth), 1, rowType, botProc, HALO_TAG, commHandle, &requests[3]);
 		MPI_Waitall(4, requests, NULL);
 #endif
 	}
@@ -301,20 +301,20 @@ static void updateBoundaryWide(double *u, int ldu, int haloWidth) {
 #endif
 #ifndef HALO_NON_BLOCKING
 		MPI_Sendrecv(
-			&V(u, 0, haloWidth), 1, colType, leftProc, HALO_TAG,
+			&V(u, 0, 1), 1, colType, leftProc, HALO_TAG,
 			&V(u, 0, N_loc + 1), 1, colType, rightProc, HALO_TAG,
 			commHandle, MPI_STATUS_IGNORE
 		);
 		MPI_Sendrecv(
-			&V(u, 0, N_loc - haloWidth), 1, colType, rightProc, HALO_TAG,
+			&V(u, 0, N_loc), 1, colType, rightProc, HALO_TAG,
 			&V(u, 0, 0), 1, colType, leftProc, HALO_TAG,
 			commHandle, MPI_STATUS_IGNORE
 		);
 #else
-		MPI_Irecv(&V(u, 0, N_loc + 1), 1, colType, rightProc, HALO_TAG, commHandle, &requests[0]);
+		MPI_Irecv(&V(u, 0, N_loc + (haloWidth * 2)), 1, colType, rightProc, HALO_TAG, commHandle, &requests[0]);
 		MPI_Irecv(&V(u, 0, 0), 1, colType, leftProc, HALO_TAG, commHandle, &requests[1]);
-		MPI_Isend(&V(u, 0, haloWidth), 1, colType, leftProc, HALO_TAG, commHandle, &requests[2]);
-		MPI_Isend(&V(u, 0, N_loc - haloWidth), 1, colType, rightProc, HALO_TAG, commHandle, &requests[3]);
+		MPI_Isend(&V(u, 0, (haloWidth * 2)), 1, colType, leftProc, HALO_TAG, commHandle, &requests[2]);
+		MPI_Isend(&V(u, 0, N_loc + haloWidth), 1, colType, rightProc, HALO_TAG, commHandle, &requests[3]);
 		MPI_Waitall(4, requests, NULL);
 #endif
 	}
