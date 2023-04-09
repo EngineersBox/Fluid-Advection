@@ -42,11 +42,6 @@ void initParParams(int M_, int N_, int P_, int Q_, int verb) {
 	N0 = (N / Q) * Q0;
 	N_loc = (Q0 < Q - 1) ? (N / Q) : (N - N0);
 
-	MPI_Type_contiguous(M_loc, MPI_DOUBLE, &rowType);
-	MPI_Type_vector(N_loc, 1, M_loc, MPI_DOUBLE, &colType);
-	MPI_Type_commit(&rowType);
-	MPI_Type_commit(&colType);
-
 #ifdef CARTESIAN_HANDLERS
 	int dimSize[2] = { P, Q };
 	int periodicity[2] = { 1, 1 };
@@ -65,6 +60,7 @@ void checkHaloSize(int w) {
 	}
 }
 
+#ifndef CARTESIAN_HANDLERS
 static int mod(int index, int axis) {
 	if (index < 0) {
 		return axis + index;
@@ -73,6 +69,15 @@ static int mod(int index, int axis) {
 	}
 	return index;
 }
+#endif
+
+static void createRowColTypes(int haloWidth) {
+	MPI_Type_contiguous(N_loc, MPI_DOUBLE, &rowType);
+	MPI_Type_vector(M_loc + (haloWidth * 2), 1, N_loc + haloWidth * 2, MPI_DOUBLE, &colType);
+	MPI_Type_commit(&rowType);
+	MPI_Type_commit(&colType);
+
+}
 
 static void updateBoundary(double *u, int ldu) {
 	int i, j;
@@ -80,8 +85,7 @@ static void updateBoundary(double *u, int ldu) {
 	//top and bottom halo 
 	//note: we get the left/right neighbour's corner elements from each end
 #ifdef HALO_NON_BLOCKING
-	MPI_Request requests[8];
-	int offset = 0;
+	MPI_Request requests[4];
 #endif
 	if (P == 1) {
 		for (j = 1; j < N_loc+1; j++) {
@@ -92,7 +96,7 @@ static void updateBoundary(double *u, int ldu) {
 #ifdef CARTESIAN_HANDLERS
 		int topProc;
 		int botProc;
-		MPI_Cart_shift(commHandle, 0, 1, &topProc, &botProc);
+		MPI_Cart_shift(commHandle, 0, -1, &topProc, &botProc);
 #else
 		int topProc = Q0 + (mod(P0 + 1, P) * Q);
 		int botProc = Q0 + (mod(P0 - 1, P) * Q);
@@ -113,7 +117,7 @@ static void updateBoundary(double *u, int ldu) {
 		MPI_Irecv(&V(u, M_loc+1, 1), 1, rowType, topProc, HALO_TAG, commHandle, &requests[1]);
 		MPI_Isend(&V(u, M_loc, 1), 1, rowType, topProc, HALO_TAG, commHandle, &requests[2]);
 		MPI_Isend(&V(u, 1, 1), 1, rowType, botProc, HALO_TAG, commHandle, &requests[3]);
-		offset = 4;
+		MPI_Waitall(4, requests, NULL);
 #endif
 	}
 	// left and right sides of halo
@@ -123,7 +127,6 @@ static void updateBoundary(double *u, int ldu) {
 			V(u, i, N_loc+1) = V(u, i, 1);
 		}
 	} else {
-		// FIXME: With Q > 1, the error rates go from e-06 to e-01. Might have to do with data type? Need to fix the errors.
 #ifdef CARTESIAN_HANDLERS	
 		int leftProc;
 		int rightProc;
@@ -134,25 +137,23 @@ static void updateBoundary(double *u, int ldu) {
 #endif
 #ifndef HALO_NON_BLOCKING
 		MPI_Sendrecv(
-			&V(u, 1, 1), 1, colType, leftProc, HALO_TAG,
-			&V(u, 1, N_loc + 1), 1, colType, rightProc, HALO_TAG,
+			&V(u, 0, 1), 1, colType, leftProc, HALO_TAG,
+			&V(u, 0, N_loc + 1), 1, colType, rightProc, HALO_TAG,
 			commHandle, MPI_STATUS_IGNORE
 		);
 		MPI_Sendrecv(
-			&V(u, 1, N_loc), 1, colType, rightProc, HALO_TAG,
-			&V(u, 1, 0), 1, colType, leftProc, HALO_TAG,
+			&V(u, 0, N_loc), 1, colType, rightProc, HALO_TAG,
+			&V(u, 0, 0), 1, colType, leftProc, HALO_TAG,
 			commHandle, MPI_STATUS_IGNORE
 		);
 #else
-		MPI_Irecv(&V(u, 1, N_loc + 1), 1, colType, rightProc, HALO_TAG, commHandle, &requests[offset + 0]);
-		MPI_Irecv(&V(u, 1, 0), 1, colType, leftProc, HALO_TAG, commHandle, &requests[offset + 1]);
-		MPI_Isend(&V(u, 1, 1), 1, colType, leftProc, HALO_TAG, commHandle, &requests[offset + 2]);
-		MPI_Isend(&V(u, 1, N_loc), 1, colType, rightProc, HALO_TAG, commHandle, &requests[offset + 3]);
+		MPI_Irecv(&V(u, 0, N_loc + 1), 1, colType, rightProc, HALO_TAG, commHandle, &requests[0]);
+		MPI_Irecv(&V(u, 0, 0), 1, colType, leftProc, HALO_TAG, commHandle, &requests[1]);
+		MPI_Isend(&V(u, 0, 1), 1, colType, leftProc, HALO_TAG, commHandle, &requests[2]);
+		MPI_Isend(&V(u, 0, N_loc), 1, colType, rightProc, HALO_TAG, commHandle, &requests[3]);
+		MPI_Waitall(4, requests, NULL);
 #endif
 	}
-#ifdef HALO_NON_BLOCKING
-	MPI_Waitall(4 + offset, requests, NULL);
-#endif
 } //updateBoundary()
 
 
@@ -163,6 +164,7 @@ void parAdvect(int reps, double *u, int ldu) {
 	v = calloc(ldv*(M_loc+2), sizeof(*v));
 	assert(v != NULL);
 	assert(ldu == N_loc + 2);
+	createRowColTypes(1);
 
 	for (r = 0; r < reps; r++) {
 		updateBoundary(u, ldu);
@@ -185,12 +187,12 @@ void parAdvectOverlap(int reps, double *u, int ldu) {
 		fprintf(stderr, "Overlapped advection is not supported for dimension Q != 1\n");
 		exit(1);
 	}
-	MPI_Request requests[8];
-	int offset = 0;
+	MPI_Request requests[4];
 	int ldv = N_loc + 2;
 	double* v = calloc(ldv*(M_loc+2), sizeof(*v));
 	assert(v != NULL);
 	assert(ldu == N_loc + 2);
+	createRowColTypes(1);
 
 	for (int r = 0; r < reps; r++) {
 		// NOTE: Next send/recv updates
@@ -202,13 +204,18 @@ void parAdvectOverlap(int reps, double *u, int ldu) {
 				V(u, M_loc+1, j) = V(u, 1, j);      
 			}
 		} else {
+#ifdef CARTESIAN_HANDLERS
+			int topProc;
+			int botProc;
+			MPI_Cart_shift(commHandle, 0, -1, &topProc, &botProc);
+#else
 			int topProc = Q0 + (mod(P0 + 1, P) * Q);
 			int botProc = Q0 + (mod(P0 - 1, P) * Q);
-			MPI_Irecv(&V(u, 0, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG, comm, &requests[0]);
-			MPI_Irecv(&V(u, M_loc+1, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG, comm, &requests[1]);
-			MPI_Isend(&V(u, M_loc, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG, comm, &requests[2]);
-			MPI_Isend(&V(u, 1, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG, comm, &requests[3]);
-			offset = 4;
+#endif
+			MPI_Irecv(&V(u, 0, 1), 1, rowType, botProc, HALO_TAG, commHandle, &requests[0]);
+			MPI_Irecv(&V(u, M_loc+1, 1), 1, rowType, topProc, HALO_TAG, commHandle, &requests[1]);
+			MPI_Isend(&V(u, M_loc, 1), 1, rowType, topProc, HALO_TAG, commHandle, &requests[2]);
+			MPI_Isend(&V(u, 1, 1), 1, rowType, botProc, HALO_TAG, commHandle, &requests[3]);
 		}
 		// Left and right sides of halo
 		if (Q == 1) { 
@@ -216,20 +223,13 @@ void parAdvectOverlap(int reps, double *u, int ldu) {
 				V(u, i, 0) = V(u, i, N_loc);
 				V(u, i, N_loc+1) = V(u, i, 1);
 			}
-		} else {
-			int leftProc = mod(Q0 + 1, Q) + (P0 * Q);
-			int rightProc = mod(Q0 - 1, Q) + (P0 * Q);
-			MPI_Irecv(&V(u, 1, N_loc + 1), 1, colType, rightProc, HALO_TAG, comm, &requests[offset + 0]);
-			MPI_Irecv(&V(u, 1, 0), 1, colType, leftProc, HALO_TAG, comm, &requests[offset + 1]);
-			MPI_Isend(&V(u, 1, 1), 1, colType, leftProc, HALO_TAG, comm, &requests[offset + 2]);
-			MPI_Isend(&V(u, 1, N_loc), 1, colType, rightProc, HALO_TAG, comm, &requests[offset + 3]);
 		}
 
 		// NOTE: Perform advection computation
 		updateAdvectField(M_loc, N_loc, &V(u,1,1), ldu, &V(v,1,1), ldv);
 		
 		// NOTE: Wait on all send/recv before copying
-		MPI_Waitall(4 + offset, requests, NULL);
+		MPI_Waitall(4, requests, NULL);
 		copyField(M_loc, N_loc, &V(v, 1, 1), ldv, &V(u, 1, 1), ldu);
 		if (verbosity > 2) {
 			char s[64];
