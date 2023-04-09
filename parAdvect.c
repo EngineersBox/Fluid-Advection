@@ -72,8 +72,8 @@ static int mod(int index, int axis) {
 #endif
 
 static void createRowColTypes(int haloWidth) {
-	MPI_Type_contiguous(N_loc, MPI_DOUBLE, &rowType);
-	MPI_Type_vector(M_loc + (haloWidth * 2), 1, N_loc + haloWidth * 2, MPI_DOUBLE, &colType);
+	MPI_Type_vector(haloWidth, N_loc, N_loc + (haloWidth * 2), MPI_DOUBLE, &rowType);
+	MPI_Type_vector(M_loc + (haloWidth * 2), 1, N_loc + (haloWidth * 2), MPI_DOUBLE, &colType);
 	MPI_Type_commit(&rowType);
 	MPI_Type_commit(&colType);
 
@@ -103,13 +103,13 @@ static void updateBoundary(double *u, int ldu) {
 #endif
 #ifndef HALO_NON_BLOCKING
 		MPI_Sendrecv(
-			&V(u, M_loc, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG,
-			&V(u, 0, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG,
+			&V(u, M_loc, 1), 1, rowType, topProc, HALO_TAG,
+			&V(u, 0, 1), 1, rowType, botProc, HALO_TAG,
 			commHandle, MPI_STATUS_IGNORE
 		);
 		MPI_Sendrecv(
-			&V(u, 1, 1), N_loc, MPI_DOUBLE, botProc, HALO_TAG,
-			&V(u, M_loc + 1, 1), N_loc, MPI_DOUBLE, topProc, HALO_TAG,
+			&V(u, 1, 1), 1, rowType, botProc, HALO_TAG,
+			&V(u, M_loc + 1, 1), 1, rowType, topProc, HALO_TAG,
 			commHandle, MPI_STATUS_IGNORE
 		);
 #else
@@ -241,8 +241,105 @@ void parAdvectOverlap(int reps, double *u, int ldu) {
 } //parAdvectOverlap()
 
 
+
+static void updateBoundaryWide(double *u, int ldu, int haloWidth) {
+	int i, j;
+
+	//top and bottom halo 
+	//note: we get the left/right neighbour's corner elements from each end
+#ifdef HALO_NON_BLOCKING
+	MPI_Request requests[4];
+#endif
+	if (P == 1) {
+		for (j = 1; j < N_loc+1; j++) {
+			V(u, 0, j) = V(u, M_loc, j);
+			V(u, M_loc+1, j) = V(u, 1, j);      
+		}
+	} else {
+#ifdef CARTESIAN_HANDLERS
+		int topProc;
+		int botProc;
+		MPI_Cart_shift(commHandle, 0, -1, &topProc, &botProc);
+#else
+		int topProc = Q0 + (mod(P0 + 1, P) * Q);
+		int botProc = Q0 + (mod(P0 - 1, P) * Q);
+#endif
+#ifndef HALO_NON_BLOCKING
+		MPI_Sendrecv(
+			&V(u, M_loc, 1), 1, rowType, topProc, HALO_TAG,
+			&V(u, 0, 1), 1, rowType, botProc, HALO_TAG,
+			commHandle, MPI_STATUS_IGNORE
+		);
+		MPI_Sendrecv(
+			&V(u, haloWidth, 1), 1, rowType, botProc, HALO_TAG,
+			&V(u, M_loc + 1, 1), 1, rowType, topProc, HALO_TAG,
+			commHandle, MPI_STATUS_IGNORE
+		);
+#else
+		MPI_Irecv(&V(u, 0, 1), 1, rowType, botProc, HALO_TAG, commHandle, &requests[0]);
+		MPI_Irecv(&V(u, M_loc+1, 1), 1, rowType, topProc, HALO_TAG, commHandle, &requests[1]);
+		MPI_Isend(&V(u, M_loc, 1), 1, rowType, topProc, HALO_TAG, commHandle, &requests[2]);
+		MPI_Isend(&V(u, haloWidth, 1), 1, rowType, botProc, HALO_TAG, commHandle, &requests[3]);
+		MPI_Waitall(4, requests, NULL);
+#endif
+	}
+	// left and right sides of halo
+	if (Q == 1) { 
+		for (i = 0; i < M_loc+2; i++) {
+			V(u, i, 0) = V(u, i, N_loc);
+			V(u, i, N_loc+1) = V(u, i, 1);
+		}
+	} else {
+#ifdef CARTESIAN_HANDLERS	
+		int leftProc;
+		int rightProc;
+		MPI_Cart_shift(commHandle, 1, 1, &leftProc, &rightProc);
+#else
+		int leftProc = mod(Q0 + 1, Q) + (P0 * Q);
+		int rightProc = mod(Q0 - 1, Q) + (P0 * Q);
+#endif
+#ifndef HALO_NON_BLOCKING
+		MPI_Sendrecv(
+			&V(u, 0, haloWidth), 1, colType, leftProc, HALO_TAG,
+			&V(u, 0, N_loc + 1), 1, colType, rightProc, HALO_TAG,
+			commHandle, MPI_STATUS_IGNORE
+		);
+		MPI_Sendrecv(
+			&V(u, 0, N_loc), 1, colType, rightProc, HALO_TAG,
+			&V(u, 0, 0), 1, colType, leftProc, HALO_TAG,
+			commHandle, MPI_STATUS_IGNORE
+		);
+#else
+		MPI_Irecv(&V(u, 0, N_loc + 1), 1, colType, rightProc, HALO_TAG, commHandle, &requests[0]);
+		MPI_Irecv(&V(u, 0, 0), 1, colType, leftProc, HALO_TAG, commHandle, &requests[1]);
+		MPI_Isend(&V(u, 0, haloWidth), 1, colType, leftProc, HALO_TAG, commHandle, &requests[2]);
+		MPI_Isend(&V(u, 0, N_loc), 1, colType, rightProc, HALO_TAG, commHandle, &requests[3]);
+		MPI_Waitall(4, requests, NULL);
+#endif
+	}
+} //updateBoundary()
+
 // wide halo variant
 void parAdvectWide(int reps, int w, double *u, int ldu) {
+	int r; 
+	double *v; int ldv = N_loc + (w * 2);
+	v = calloc(ldv*(M_loc + (w * 2)), sizeof(*v));
+	assert(v != NULL);
+	assert(ldu == N_loc + (w * 2));
+	createRowColTypes(w);
+
+	for (r = 0; r < reps; r++) {
+		updateBoundaryWide(u, ldu, w);
+		updateAdvectField(M_loc, N_loc, &V(u,1,1), ldu, &V(v,1,1), ldv);
+		copyField(M_loc, N_loc, &V(v,1,1), ldv, &V(u,1,1), ldu);
+
+		if (verbosity > 2) {
+			char s[64]; sprintf(s, "%d reps: u", r+1);
+			printAdvectField(rank, s, M_loc + (w * 2), N_loc + (w * 2), u, ldu);
+		}
+	}
+
+	free(v);
 
 } //parAdvectWide()
 
