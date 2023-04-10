@@ -191,14 +191,14 @@ void parAdvectOverlap(int reps, double *u, int ldu) {
 		fprintf(stderr, "Overlapped comm/comp not supported for Q > 1");
 		exit(1);
 	}
-	MPI_Request recvRequests[2];
-	MPI_Request sendRequests[2];
+	MPI_Request btRecvRequests[2];
+	MPI_Request requests[2];
 	int ldv = N_loc + 2;
 	double* v = calloc(ldv*(M_loc+2), sizeof(*v));
 	assert(v != NULL);
 	assert(ldu == N_loc + 2);
 	createRowColTypes(1);
-	// TODO: Fix this computation
+	// TODO: Fix this computation, make it 2D and have explicit corner exchanges
 	for (int r = 0; r < reps; r++) {
 		// 1. Send ghost zones
 		// Top and bottom of halo
@@ -208,10 +208,8 @@ void parAdvectOverlap(int reps, double *u, int ldu) {
 				V(u, M_loc+1, j) = V(u, 1, j);      
 			}
 		} else {
-			MPI_Irecv(&V(u, 0, 1), 1, rowType, botProc, HALO_TAG, commHandle, &recvRequests[0]);
-			MPI_Irecv(&V(u, M_loc+1, 1), 1, rowType, topProc, HALO_TAG, commHandle, &recvRequests[1]);
-			MPI_Isend(&V(u, M_loc, 1), 1, rowType, topProc, HALO_TAG, commHandle, &sendRequests[0]);
-			MPI_Isend(&V(u, 1, 1), 1, rowType, botProc, HALO_TAG, commHandle, &sendRequests[1]);
+			MPI_Irow_exchange(M_loc, 1, topProc, 0, 1, botProc, 0);
+			MPI_Irow_exchange(1, 1, botProc, M_loc + 1, 1, topProc, 1);
 		}
 		// Left and right sides of halo
 		if (Q == 1) { 
@@ -223,14 +221,14 @@ void parAdvectOverlap(int reps, double *u, int ldu) {
 		// 2. Compute advection for inner points
 		updateAdvectField(M_loc - 2, N_loc, &V(u, 2, 1), ldu, &V(v, 2, 1), ldv);
 		// 3. Wait for recieves
-		MPI_Waitall(2, recvRequests, NULL);
+		MPI_Waitall(2, btRecvRequests, NULL);
 		// 4. Compute advection for border points
 		// Top
 		updateAdvectField(1, N_loc, &V(u, M_loc + 1, 1), ldu, &V(v, M_loc + 1, 1), ldv);
 		// Bottom
 		updateAdvectField(1, N_loc, &V(u, 1, 1), ldu, &V(v, 1, 1), ldv);
 		// 5. Wait for sends
-		MPI_Waitall(2, sendRequests, NULL);
+		MPI_Waitall(2, requests, NULL);
 		// 6. Copy field
 		copyField(M_loc, N_loc, &V(v, 1, 1), ldv, &V(u, 1, 1), ldu);
 		if (verbosity > 2) {
