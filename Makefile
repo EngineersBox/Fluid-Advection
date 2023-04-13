@@ -6,12 +6,14 @@
 HDRS=serAdvect.h parAdvect.h
 OBJS=serAdvect.o parAdvect.o
 PROG=testAdvect
-CCFLAGS=-O3
+FFT_CONV_KERNEL=0
+CCFLAGS=-O3 -DFFT_CONV_KERNEL=$(FFT_CONV_KERNEL)
+LINKERFLAGS=
 
 all: $(PROG) 
 
 %: %.o $(OBJS)
-	mpicc -o $* $*.o $(OBJS) -lm
+	mpicc -o $* $*.o $(OBJS) $(LINKERFLAGS) -lm
 %.o: %.c $(HDRS)
 	mpicc -Wall $(CCFLAGS) -c $*.c
 clean:

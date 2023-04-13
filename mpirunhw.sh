@@ -1,3 +1,3 @@
 #!/bin/sh
 
-mpirun --hostfile hostfile --use-hwthread-cpus $@
+mpirun --hostfile hostfile --use-hwthread-cpus --tag-output $@

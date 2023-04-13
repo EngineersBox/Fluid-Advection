@@ -6,6 +6,14 @@
 #include <stdlib.h>
 #include <mpi.h>
 #include <assert.h>
+#include <memory.h>
+#include <complex.h>
+#include <math.h>
+
+//#define FFT_CONV_KERNEL 0
+#if FFT_CONV_KERNEL == 1
+#include <fftw3.h>
+#endif
 
 #include "serAdvect.h"
 
@@ -20,11 +28,10 @@ static int P0, Q0; // 2D process id (P0, Q0) in P x Q process grid
 static int M, N, P, Q; // local store of problem parameters
 static int verbosity;
 static int rank, nprocs;       // MPI values
-static int topProc, botProc, leftProc, rightProc; // Neighbourhood proceses
-static MPI_Comm comm;
-static MPI_Comm commHandle;
-static MPI_Datatype rowType;
-static MPI_Datatype colType;
+static int topProc, botProc, leftProc, rightProc; // Von-Neumann neighbourhood proceses
+static int topLeftProc, topRightProc, botLeftProc, botRightProc; // Corner neighbourhood processes
+static MPI_Comm comm, commHandle; // Communication handlers for main and Cartesian configurations
+static MPI_Datatype rowType, colType, cornerType; // Data types for exchanges
 
 // Neighbourhood rank caluclation macros
 
@@ -32,6 +39,14 @@ static MPI_Datatype colType;
 #define calculateNeighbours() ({\
 	if (P > 1) MPI_Cart_shift(commHandle, 0, -1, &topProc, &botProc); \
 	if (Q > 1) MPI_Cart_shift(commHandle, 1, 1, &leftProc, &rightProc); \
+	int _tlc[] = { P0 + 1, Q0 + 1 }; \
+	int _trc[] = { P0 + 1, Q0 - 1 }; \
+	int _blc[] = { P0 - 1, Q0 + 1 }; \
+	int _brc[] = { P0 - 1, Q0 - 1 }; \
+	MPI_Cart_rank(commHandle, _tlc, &topLeftProc); \
+	MPI_Cart_rank(commHandle, _trc, &topRightProc); \
+	MPI_Cart_rank(commHandle, _blc, &botLeftProc); \
+	MPI_Cart_rank(commHandle, _brc, &botRightProc); \
 })
 #else
 __attribute__((always_inline)) static inline int mod(int index, int axis) {
@@ -42,6 +57,7 @@ __attribute__((always_inline)) static inline int mod(int index, int axis) {
 	}
 	return index;
 }
+#define coordShift(coords) mod(Q0 + (coords)[1], Q) + (mod(P0 + (coords)[0], P) * Q);
 #define calculateNeighbours() \
 	if (P > 1) { \
 		topProc = Q0 + (mod(P0 + 1, P) * Q); \
@@ -50,8 +66,15 @@ __attribute__((always_inline)) static inline int mod(int index, int axis) {
 	if (Q > 1) { \
 		leftProc = mod(Q0 + 1, Q) + (P0 * Q); \
 		rightProc = mod(Q0 - 1, Q) + (P0 * Q); \
-	}
-
+	} \
+	int _tlc[] = { +1, +1 }; \
+	int _trc[] = { +1, -1 }; \
+	int _blc[] = { -1, +1 }; \
+	int _brc[] = { -1, -1 }; \
+	topLeftProc = coordShift(_tlc); \
+	topRightProc = coordShift(_trc); \
+	botLeftProc = coordShift(_blc); \
+	botRightProc = coordShift(_brc);
 #endif
 
 //sets up parallel parameters above
@@ -83,48 +106,71 @@ void initParParams(int M_, int N_, int P_, int Q_, int verb) {
 
 
 void checkHaloSize(int w) {
-	if (w > M_loc || w > N_loc) {
-		printf("%d: w=%d too large for %dx%d local field! Exiting...\n",
-				rank, w, M_loc, N_loc);
-		exit(1);
+	if (rank == 0 && (w > M_loc || w > N_loc)) {
+		fprintf(
+				stderr,
+				"%d: w=%d too large for %dx%d local field! Exiting...\n",
+				rank,
+				w,
+				M_loc,
+				N_loc
+		);
+		MPI_Abort(MPI_COMM_WORLD, 1);
 	}
 }
 
 static void createRowColTypes(int haloWidth) {
 	MPI_Type_vector(haloWidth, N_loc, N_loc + (haloWidth * 2), MPI_DOUBLE, &rowType);
-	MPI_Type_vector(M_loc + (haloWidth * 2), haloWidth, N_loc + (haloWidth * 2), MPI_DOUBLE, &colType);
+	MPI_Type_vector(M_loc, haloWidth, N_loc + (haloWidth * 2), MPI_DOUBLE, &colType);
+	MPI_Type_vector(haloWidth, haloWidth, N_loc + (haloWidth * 2), MPI_DOUBLE, &cornerType);
 	MPI_Type_commit(&rowType);
 	MPI_Type_commit(&colType);
+	MPI_Type_commit(&cornerType);
 
 }
 
 // Exchange macros
+#define MPI_Init_exchange() \
+	MPI_Request recvRequests[8]; \
+	MPI_Request sendRequests[8]; \
+	size_t MPI_Reset_exchange()
 
-#define MPI_Irow_exchange(srcY, srcX, srcRank, dstY, dstX, dstRank, index) \
-	MPI_Irecv(&V(u, dstY, dstX), 1, rowType, dstRank, HALO_TAG, commHandle, &btRecvRequests[index]); \
-	MPI_Isend(&V(u, srcY, srcX), 1, rowType, srcRank, HALO_TAG, commHandle, &requests[index])
+#define MPI_Reset_exchange() offset = 0
+
+#define MPI_Waitall_exchange() \
+	MPI_Waitall(offset, recvRequests, NULL); \
+	MPI_Waitall(offset, sendRequests, NULL)
+
+#define MPI_Irow_exchange(srcY, srcX, srcRank, dstY, dstX, dstRank) \
+	MPI_Irecv(&V(u, dstY, dstX), 1, rowType, dstRank, HALO_TAG, commHandle, &recvRequests[offset]); \
+	MPI_Isend(&V(u, srcY, srcX), 1, rowType, srcRank, HALO_TAG, commHandle, &sendRequests[offset]); \
+	offset++
+
 #define MPI_Blocking_exchange(srcY, srcX, srcRank, dstY, dstX, dstRank, type) \
 	MPI_Sendrecv( \
 			&V(u, srcY, srcX), 1, type, srcRank, HALO_TAG, \
 			&V(u, dstY, dstX), 1, type, dstRank, HALO_TAG, \
 			commHandle, MPI_STATUS_IGNORE \
 	)
-#define MPI_Icol_exchange(srcY, srcX, srcRank, dstY, dstX, dstRank, index) \
-		MPI_Irecv(&V(u, dstY, dstX), 1, colType, dstRank, HALO_TAG, commHandle, &requests[index]); \
-		MPI_Isend(&V(u, srcY, srcX), 1, colType, srcRank, HALO_TAG, commHandle, &requests[(index) + 2])
+
+#define MPI_Icol_exchange(srcY, srcX, srcRank, dstY, dstX, dstRank) \
+	MPI_Irecv(&V(u, dstY, dstX), 1, colType, dstRank, HALO_TAG, commHandle, &recvRequests[offset]); \
+	MPI_Isend(&V(u, srcY, srcX), 1, colType, srcRank, HALO_TAG, commHandle, &sendRequests[offset]); \
+	offset++
+
+#define MPI_Icorner_exchange(srcY, srcX, dstY, dstX, rank) \
+	MPI_Irecv(&V(u, dstY, dstX), 1, cornerType, rank, HALO_TAG, commHandle, &recvRequests[offset]); \
+	MPI_Isend(&V(u, srcY, srcX), 1, cornerType, rank, HALO_TAG, commHandle, &sendRequests[offset]); \
+	offset++
 
 static void updateBoundary(double *u, int ldu) {
-	int i, j;
-
 	//top and bottom halo 
 	//note: we get the left/right neighbour's corner elements from each end
 #ifdef HALO_NON_BLOCKING
-	MPI_Request btRecvRequests[2];
-	MPI_Request requests[6];
-	size_t offset = 0;
+	MPI_Init_exchange();
 #endif
 	if (P == 1) {
-		for (j = 1; j < N_loc+1; j++) {
+		for (int j = 1; j < N_loc+1; j++) {
 			V(u, 0, j) = V(u, M_loc, j);
 			V(u, M_loc+1, j) = V(u, 1, j);      
 		}
@@ -133,15 +179,16 @@ static void updateBoundary(double *u, int ldu) {
 		MPI_Blocking_exchange(M_loc, 1, topProc, 0, 1, botProc, rowType);
 		MPI_Blocking_exchange(1, 1, botProc, M_loc + 1, 1, topProc, rowType);
 #else
-		MPI_Irow_exchange(M_loc, 1, topProc, 0, 1, botProc, 0);
-		MPI_Irow_exchange(1, 1, botProc, M_loc + 1, 1, topProc, 1);
-		MPI_Waitall(2, btRecvRequests, NULL);
-		offset = 2;
+		MPI_Irow_exchange(M_loc, 1, topProc, 0, 1, botProc);
+		MPI_Irow_exchange(1, 1, botProc, M_loc + 1, 1, topProc);
 #endif
 	}
 	// left and right sides of halo
-	if (Q == 1) { 
-		for (i = 0; i < M_loc+2; i++) {
+	if (Q == 1) {
+#ifdef HALO_NON_BLOCKING
+		MPI_Waitall_exchange();
+#endif
+		for (int i = 0; i < M_loc + 2; i++) {
 			V(u, i, 0) = V(u, i, N_loc);
 			V(u, i, N_loc+1) = V(u, i, 1);
 		}
@@ -150,27 +197,27 @@ static void updateBoundary(double *u, int ldu) {
 		MPI_Blocking_exchange(0, 1, leftProc, 0, N_loc + 1, rightProc, colType);
 		MPI_Blocking_exchange(0, N_loc, rightProc, 0, 0, leftProc, colType);
 #else
-		MPI_Icol_exchange(0, 1, leftProc, 0, N_loc + 1, rightProc, offset);
-		MPI_Icol_exchange(0, N_loc, rightProc, 0, 0, leftProc, offset + 1);
-		offset = 6;
+		MPI_Icol_exchange(1, 1, leftProc, 1, N_loc + 1, rightProc);
+		MPI_Icol_exchange(1, N_loc, rightProc, 1, 0, leftProc);
+		MPI_Icorner_exchange(1, 1, 0, 0, botLeftProc);
+		MPI_Icorner_exchange(M_loc, N_loc, M_loc + 1, N_loc + 1, topRightProc);
+		MPI_Icorner_exchange(1, N_loc, 0, N_loc + 1, botRightProc);
+		MPI_Icorner_exchange(M_loc, 1, M_loc + 1, 0, topLeftProc);
+		MPI_Waitall_exchange();
 #endif
 	}
-#ifdef HALO_NON_BLOCKING
-	MPI_Waitall(offset, requests, NULL);
-#endif
 } //updateBoundary()
 
 
 // evolve advection over r timesteps, with (u,ldu) containing the local field
 void parAdvect(int reps, double *u, int ldu) {
-	int r; 
-	double *v; int ldv = N_loc+2;
-	v = calloc(ldv*(M_loc+2), sizeof(*v));
+	int ldv = N_loc + 2;
+	assert(ldu == ldv);
+	double* v = calloc(ldv * ldv, sizeof(*v));
 	assert(v != NULL);
-	assert(ldu == N_loc + 2);
 	createRowColTypes(1);
 
-	for (r = 0; r < reps; r++) {
+	for (int r = 0; r < reps; r++) {
 		updateBoundary(u, ldu);
 		updateAdvectField(M_loc, N_loc, &V(u,1,1), ldu, &V(v,1,1), ldv);
 		copyField(M_loc, N_loc, &V(v,1,1), ldv, &V(u,1,1), ldu);
@@ -187,48 +234,61 @@ void parAdvect(int reps, double *u, int ldu) {
 
 // overlap communication variant
 void parAdvectOverlap(int reps, double *u, int ldu) {
-	if (Q > 1) {
-		fprintf(stderr, "Overlapped comm/comp not supported for Q > 1");
-		exit(1);
-	}
-	MPI_Request btRecvRequests[2];
-	MPI_Request requests[2];
 	int ldv = N_loc + 2;
-	double* v = calloc(ldv*(M_loc+2), sizeof(*v));
+	assert(ldu == ldv);
+	double* v = calloc(ldv * ldv, sizeof(*v));
 	assert(v != NULL);
-	assert(ldu == N_loc + 2);
+	MPI_Init_exchange();
 	createRowColTypes(1);
-	// TODO: Fix this computation, make it 2D and have explicit corner exchanges
 	for (int r = 0; r < reps; r++) {
+		MPI_Reset_exchange();
 		// 1. Send ghost zones
-		// Top and bottom of halo
+		// Top and bottom sides of halo (no corners)
 		if (P == 1) {
-			for (int j = 1; j < N_loc+1; j++) {
+			for (int j = 1; j < N_loc + 1; j++) {
 				V(u, 0, j) = V(u, M_loc, j);
 				V(u, M_loc+1, j) = V(u, 1, j);      
 			}
 		} else {
-			MPI_Irow_exchange(M_loc, 1, topProc, 0, 1, botProc, 0);
-			MPI_Irow_exchange(1, 1, botProc, M_loc + 1, 1, topProc, 1);
+			MPI_Irow_exchange(M_loc, 1, topProc, 0, 1, botProc);
+			MPI_Irow_exchange(1, 1, botProc, M_loc + 1, 1, topProc);
 		}
-		// Left and right sides of halo
+		// Left and right sides of halo (no corners)
 		if (Q == 1) { 
-			for (int i = 0; i < M_loc+2; i++) {
+			for (int i = 1; i < M_loc + 1; i++) {
 				V(u, i, 0) = V(u, i, N_loc);
 				V(u, i, N_loc+1) = V(u, i, 1);
 			}
+		} else {
+			MPI_Icol_exchange(1, 1, leftProc, 1, N_loc + 1, rightProc);
+			MPI_Icol_exchange(1, N_loc, rightProc, 1, 0, leftProc);
+			MPI_Icorner_exchange(1, 1, 0, 0, botLeftProc);
+			MPI_Icorner_exchange(M_loc, N_loc, M_loc + 1, N_loc + 1, topRightProc);
+			MPI_Icorner_exchange(1, N_loc, 0, N_loc + 1, botRightProc);
+			MPI_Icorner_exchange(M_loc, 1, M_loc + 1, 0, topLeftProc);
 		}
 		// 2. Compute advection for inner points
-		updateAdvectField(M_loc - 2, N_loc, &V(u, 2, 1), ldu, &V(v, 2, 1), ldv);
+		updateAdvectField(M_loc - 2, N_loc - 2, &V(u, 2, 2), ldu, &V(v, 2, 2), ldv);
 		// 3. Wait for recieves
-		MPI_Waitall(2, btRecvRequests, NULL);
+		MPI_Waitall(offset, recvRequests, NULL);
+		if (Q == 1) {
+			// Send corners
+			V(u, 0, 0) = V(u, 0, N_loc);
+			V(u, 0, N_loc + 1) = V(u, 0, 1);
+			V(u, M_loc + 1, 0) = V(u, M_loc + 1, N_loc);
+			V(u, M_loc + 1, N_loc + 1)  = V(u, M_loc + 1, 1);
+		}
 		// 4. Compute advection for border points
 		// Top
-		updateAdvectField(1, N_loc, &V(u, M_loc + 1, 1), ldu, &V(v, M_loc + 1, 1), ldv);
+		updateAdvectField(1, N_loc - 2, &V(u, M_loc, 2), ldu, &V(v, M_loc, 2), ldv);
 		// Bottom
-		updateAdvectField(1, N_loc, &V(u, 1, 1), ldu, &V(v, 1, 1), ldv);
+		updateAdvectField(1, N_loc - 2, &V(u, 1, 2), ldu, &V(v, 1, 2), ldv);
+		// Left
+		updateAdvectField(M_loc, 1, &V(u, 1, 1), ldu, &V(v, 1, 1), ldv);
+		// Right
+		updateAdvectField(M_loc, 1, &V(u, 1, N_loc), ldu, &V(v, 1, N_loc), ldv);
 		// 5. Wait for sends
-		MPI_Waitall(2, requests, NULL);
+		MPI_Waitall(offset, sendRequests, NULL);
 		// 6. Copy field
 		copyField(M_loc, N_loc, &V(v, 1, 1), ldv, &V(u, 1, 1), ldu);
 		if (verbosity > 2) {
@@ -242,64 +302,59 @@ void parAdvectOverlap(int reps, double *u, int ldu) {
 
 
 
-static void updateBoundaryWide(double *u, int ldu, int haloWidth) {
-	int i, j;
-
+static void updateBoundaryWide(double *u, int ldu, int w) {
 	//top and bottom halo 
 	//note: we get the left/right neighbour's corner elements from each end
 #ifdef HALO_NON_BLOCKING
-	MPI_Request btRecvRequests[2];
-	MPI_Request requests[6];
-	size_t offset = 0;
+	MPI_Init_exchange();
 #endif
 	if (P == 1) {
-		for (j = 1; j < N_loc + haloWidth; j++) {
+		for (int j = 1; j < N_loc + w; j++) {
 			V(u, 0, j) = V(u, M_loc, j);
-			V(u, M_loc + haloWidth, j) = V(u, haloWidth, j);      
+			V(u, M_loc + w, j) = V(u, w, j);      
 		}
 	} else {
 #ifndef HALO_NON_BLOCKING
-		MPI_Blocking_exchange(M_loc, haloWidth, topProc, 0, haloWidth, botProc, rowType);
-		MPI_Blocking_exchange(haloWidth, haloWidth, botProc, M_loc + haloWidth, haloWidth, topProc, rowType);
+		MPI_Blocking_exchange(M_loc, w, topProc, 0, w, botProc, rowType);
+		MPI_Blocking_exchange(w, w, botProc, M_loc + w, w, topProc, rowType);
 #else
-		MPI_Irow_exchange(M_loc, haloWidth, topProc, 0, haloWidth, botProc, 0);
-		MPI_Irow_exchange(haloWidth, haloWidth, botProc, M_loc + haloWidth, haloWidth, topProc, 1);
-		MPI_Waitall(2, btRecvRequests, NULL);
-		offset = 2;
+		MPI_Irow_exchange(M_loc, w, topProc, 0, w, botProc);
+		MPI_Irow_exchange(w, w, botProc, M_loc + w, w, topProc);
 #endif
 	}
 	// left and right sides of halo
 	if (Q == 1) { 
-		for (i = 0; i < M_loc + haloWidth; i++) {
+		for (int i = 0; i < M_loc + (w * 2); i++) {
 			V(u, i, 0) = V(u, i, N_loc);
-			V(u, i, N_loc + haloWidth) = V(u, i, haloWidth);
+			V(u, i, N_loc + w) = V(u, i, w);
 		}
 	} else {
 #ifndef HALO_NON_BLOCKING
-		MPI_Blocking_exchange(0, haloWidth, leftProc, 0, N_loc + haloWidth, rightProc, colType);
+		MPI_Blocking_exchange(0, w, leftProc, 0, N_loc + w, rightProc, colType);
 		MPI_Blocking_exchange(0, N_loc, rightProc, 0, 0, leftProc, colType);
 #else
-		MPI_Icol_exchange(0, haloWidth, leftProc, 0, N_loc + haloWidth, rightProc, offset);
-		MPI_Icol_exchange(0, N_loc, rightProc, 0, 0, leftProc, offset + 1);
-		offset = 6;
+		MPI_Icol_exchange(w, w, leftProc, w, N_loc + w, rightProc);
+		MPI_Icol_exchange(w, N_loc, rightProc, w, 0, leftProc);
+		MPI_Icorner_exchange(w, w, 0, 0, botLeftProc);
+		MPI_Icorner_exchange(M_loc, N_loc, M_loc + w, N_loc + w, topRightProc);
+		MPI_Icorner_exchange(w, N_loc, 0, N_loc + w, botRightProc);
+		MPI_Icorner_exchange(M_loc, w, M_loc + w, 0, topLeftProc);
 #endif
 	}
 #ifdef HALO_NON_BLOCKING
-	MPI_Waitall(offset, requests, NULL);
+	MPI_Waitall_exchange();
 #endif
 } //updateBoundary()
 
 // wide halo variant
 void parAdvectWide(int reps, int w, double *u, int ldu) {
-	int r; 
-	double *v; int ldv = N_loc + (w * 2);
-	v = calloc(ldv*(M_loc + (w * 2)), sizeof(*v));
+	int ldv = N_loc + (w * 2);
+	assert(ldu == ldv);
+	double* v = calloc(ldv * ldv, sizeof(*v));
 	assert(v != NULL);
-	assert(ldu == N_loc + (w * 2));
 	createRowColTypes(w);
-
 	int updateIndex = 1;
-	for (r = 0; r < reps; r++) {
+	for (int r = 0; r < reps; r++) {
 		if (r % w == 0) {
 			updateIndex = 1;
 			updateBoundaryWide(u, ldu, w);
@@ -328,8 +383,62 @@ void parAdvectWide(int reps, int w, double *u, int ldu) {
 
 } //parAdvectWide()
 
+void _fft(double complex *restrict const buf,
+		  double complex *restrict const out,
+		  size_t const n,
+		  size_t const step) {
+	if (step >= n) {
+		return;
+	}
+	double complex t;
+	_fft(out, buf, n, step * 2);
+	_fft(out + step, buf + step, n, step * 2);
+	for (size_t i = 0; i < n; i+= 2 * step) {
+		t = cexp(-I * M_PI * (double) i / (double) n) * out[i + step];
+		buf[i / 2] = out[i] + t;
+		buf[i + (n - i) / 2] = out[i] - t;
+	}
+}
+
+int fft(double complex *const buf, const size_t n) {
+	double complex out[n];
+	if ((n & (n -1)) != 0) {
+		return -1;
+	}
+	memcpy(out, buf, n);
+	_fft(buf, out, n, 1);
+	return 0;
+}
 
 // extra optimization variant
 void parAdvectExtra(int r, double *u, int ldu) {
-
+	// -------------------------
+	// S = Stencil
+	// a_0 = Initial data
+	// a_T = Final data
+	// F = DFT matrix
+	// F^-1 = Inverse DFT matrix
+	// FSF^-1 = Diagronal matrix
+	// T = Number of timesteps
+	// MP = Matrix product
+	// EV = Evolution
+	// IFFT = Inverse FFT
+	// RS = Repeated squaring
+	// -------------------------
+	//
+	// [S] -FFT-> [FSF^-1] -RS-> [F*S^T*F^-1]
+	//                           |
+	// [a_0] -FFT-> [F*a_0] -----+-MP--> [(F*S^T*F^-1)(F*a_0)] -EV-> [F*a_T] -IFFT-> [a_T]
+#if FFT_CONV_KERNEL == 1
+	fftw_complex* in;
+	fftw_complex* out;
+	fftw_plan p;
+	in = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (M_loc * N_loc));
+	out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (M_loc * N_loc));
+	p = fftw_plan_dft_1d(M_loc * N_loc, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
+	fftw_execute(p);
+	fftw_destroy_plan(p);
+	fftw_free(in);
+	fftw_free(out);
+#endif
 } //parAdvectExtra()
