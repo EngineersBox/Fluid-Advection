@@ -324,6 +324,9 @@ static void updateBoundaryWide(double *u, int ldu, int w) {
 	}
 	// left and right sides of halo
 	if (Q == 1) { 
+#ifdef HALO_NON_BLOCKING
+		MPI_Waitall_exchange();
+#endif
 		for (int i = 0; i < M_loc + (w * 2); i++) {
 			V(u, i, 0) = V(u, i, N_loc);
 			V(u, i, N_loc + w) = V(u, i, w);
@@ -339,11 +342,9 @@ static void updateBoundaryWide(double *u, int ldu, int w) {
 		MPI_Icorner_exchange(M_loc, N_loc, M_loc + w, N_loc + w, topRightProc);
 		MPI_Icorner_exchange(w, N_loc, 0, N_loc + w, botRightProc);
 		MPI_Icorner_exchange(M_loc, w, M_loc + w, 0, topLeftProc);
+		MPI_Waitall_exchange();
 #endif
 	}
-#ifdef HALO_NON_BLOCKING
-	MPI_Waitall_exchange();
-#endif
 } //updateBoundary()
 
 // wide halo variant
