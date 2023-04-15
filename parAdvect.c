@@ -18,7 +18,7 @@
 #include "serAdvect.h"
 
 #define HALO_TAG 100
-#define HALO_NON_BLOCKING
+//#define HALO_NON_BLOCKING
 #define CARTESIAN_HANDLERS
 
 int M_loc, N_loc; // local advection field size (excluding halo) 
@@ -74,7 +74,7 @@ __attribute__((always_inline)) static inline int mod(int index, int axis) {
 	topLeftProc = coordShift(_tlc); \
 	topRightProc = coordShift(_trc); \
 	botLeftProc = coordShift(_blc); \
-	botRightProc = coordShift(_brc);
+	botRightProc = coordShift(_brc)
 #endif
 
 //sets up parallel parameters above
@@ -194,8 +194,12 @@ static void updateBoundary(double *u, int ldu) {
 		}
 	} else {
 #ifndef HALO_NON_BLOCKING
-		MPI_Blocking_exchange(0, 1, leftProc, 0, N_loc + 1, rightProc, colType);
-		MPI_Blocking_exchange(0, N_loc, rightProc, 0, 0, leftProc, colType);
+		MPI_Blocking_exchange(1, 1, leftProc, 1, N_loc + 1, rightProc, colType);
+		MPI_Blocking_exchange(1, N_loc, rightProc, 1, 0, leftProc, colType);
+		MPI_Blocking_exchange(1, 1, botLeftProc, M_loc + 1, N_loc + 1, topRightProc, cornerType);
+		MPI_Blocking_exchange(M_loc, N_loc, topRightProc, 0, 0, botLeftProc, cornerType);
+		MPI_Blocking_exchange(1, N_loc, botRightProc, M_loc + 1, 0, topLeftProc, cornerType);
+		MPI_Blocking_exchange(M_loc, 1, topLeftProc, 0, N_loc + 1, botRightProc, cornerType);
 #else
 		MPI_Icol_exchange(1, 1, leftProc, 1, N_loc + 1, rightProc);
 		MPI_Icol_exchange(1, N_loc, rightProc, 1, 0, leftProc);
@@ -333,8 +337,12 @@ static void updateBoundaryWide(double *u, int ldu, int w) {
 		}
 	} else {
 #ifndef HALO_NON_BLOCKING
-		MPI_Blocking_exchange(0, w, leftProc, 0, N_loc + w, rightProc, colType);
-		MPI_Blocking_exchange(0, N_loc, rightProc, 0, 0, leftProc, colType);
+		MPI_Blocking_exchange(w, w, leftProc, w, N_loc + w, rightProc, colType);
+		MPI_Blocking_exchange(w, N_loc, rightProc, w, 0, leftProc, colType);
+		MPI_Blocking_exchange(w, w, botLeftProc, M_loc + w, N_loc + w, topRightProc, cornerType);
+		MPI_Blocking_exchange(M_loc, N_loc, topRightProc, 0, 0, botLeftProc, cornerType);
+		MPI_Blocking_exchange(w, N_loc, botRightProc, M_loc + w, 0, topLeftProc, cornerType);
+		MPI_Blocking_exchange(M_loc, w, topLeftProc, 0, N_loc + w, botRightProc, cornerType);
 #else
 		MPI_Icol_exchange(w, w, leftProc, w, N_loc + w, rightProc);
 		MPI_Icol_exchange(w, N_loc, rightProc, w, 0, leftProc);
