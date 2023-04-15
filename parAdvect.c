@@ -18,7 +18,7 @@
 #include "serAdvect.h"
 
 #define HALO_TAG 100
-//#define HALO_NON_BLOCKING
+#define HALO_NON_BLOCKING
 #define CARTESIAN_HANDLERS
 
 int M_loc, N_loc; // local advection field size (excluding halo) 
