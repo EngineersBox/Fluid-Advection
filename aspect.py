@@ -43,18 +43,34 @@ duration_2 = [
     3.83e-02
 ]
 duration_2_pred = [model(100,2048,2048,p,p) for p in [1,2,3,4,5,6]]
-d_type = (["Actual"] * 5) + (["Predicted"] * 5)
-d_type_2 = (["Actual"] * 6) + (["Predicted"] * 6)
+# d_type = (["Actual"] * 5) + (["Predicted"] * 5)
+# d_type_2 = (["Actual"] * 6) + (["Predicted"] * 6)
+d_type = (["x1"] * 5) + (["x10"] * 5)
+d_type_2 = (["x1"] * 6) + (["x10"] * 6)
+
+t_w *= 10.0
+duration_pred_10 = [model(100,2048,2048,p,q) for (p,q) in [(1,48),(2,24),(3,16),(4,12),(6,8)]]
+duration_2_pred_10 = [model(100,2048,2048,p,p) for p in [1,2,3,4,5,6]]
 
 print("Rectangular:", list(map(lambda a: "{:e}".format(a), duration_pred)))
 print("Square:", list(map(lambda a: "{:e}".format(a), duration_2_pred)))
+print("Rectangular x10:", list(map(lambda a: "{:e}".format(a), duration_pred_10)))
+print("Square x10:", list(map(lambda a: "{:e}".format(a), duration_2_pred_10)))
 
 data = pd.DataFrame({"Aspect Ratio": processes + processes, "Duration (S)": duration + duration_pred, "Type": d_type})
 data2 = pd.DataFrame({"Aspect Ratio": processes_2 + processes_2, "Duration (S)": duration_2 + duration_2_pred, "Type": d_type_2})
 
+data_10 = pd.DataFrame({"Aspect Ratio": processes + processes, "Duration (S)": duration_pred + duration_pred_10, "t_w multiplier": d_type})
+data2_10 = pd.DataFrame({"Aspect Ratio": processes_2 + processes_2, "Duration (S)": duration_2_pred + duration_2_pred_10, "t_w multiplier": d_type_2})
+
 # f, axes = plt.subplots(1, 2, sharey=True)
-sns.barplot(y = "Duration (S)", x = "Aspect Ratio", data = data, hue = "Type")
+#sns.barplot(y = "Duration (S)", x = "Aspect Ratio", data = data, hue = "Type")
 #sns.barplot(y = "Duration (S)", x = "Aspect Ratio", data = data2, hue = "Type")
+
+#sns.barplot(y = "Duration (S)", x = "Aspect Ratio", data = data_10, hue = "t_w multiplier")
+sns.barplot(y = "Duration (S)", x = "Aspect Ratio", data = data2_10, hue = "t_w multiplier")
+
 # plt.ticklabel_format(style="scientific", axis="y", scilimits=(0,0))
-plt.title("Rectangular Process Grid Aspect Ratio Advection Time")
+# plt.title("Rectangular Process Grid Aspect Ratio Advection Time")
+plt.title("Predicted Square Process Grid Aspect Ratio Advection Time")
 plt.show()
