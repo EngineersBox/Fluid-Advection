@@ -14,7 +14,7 @@ def model(r,m,n,p,q):
 # processes = [
     # "1x48",
     # "2x24",
-    # "3x16",
+# "3x16",
     # "4x12",
     # "6x8",
 # ]
@@ -62,7 +62,7 @@ processes_2 = [
 ]
 duration_pred = [model(100,3000,3000,p,q) for (p,q) in [(1,192),(2,96),(3,64),(4,48),(6,32),(8,24),(12,16)]]
 duration_2_pred = [model(100,3000,3000,p,p) for p in [1,2,4,8,13]]
-# d_type = (["Actual"] * 7)# + (["Predicted"] * )
+# d_type = (["Actual"] * 7)# + (["Predicted"] * 5)
 # d_type_2 = (["Actual"] * 5)# + (["Predicted"] * 5)
 d_type = (["x1"] * 7) + (["x10"] * 7)
 d_type_2 = (["x1"] * 5) + (["x10"] * 5)
@@ -76,8 +76,8 @@ duration_2_pred_10 = [model(100,3000,3000,p,p) for p in [1,2,4,8,13]]
 
 # print("Rectangular:", list(map(lambda a: "{:e}".format(a), duration_pred)))
 # print("Square:", list(map(lambda a: "{:e}".format(a), duration_2_pred)))
-# print("Rectangular x10:", list(map(lambda a: "{:e}".format(a), duration_pred_10)))
-# print("Square x10:", list(map(lambda a: "{:e}".format(a), duration_2_pred_10)))
+print("Rectangular x10:", list(map(lambda a: "{:e}".format(a), duration_pred_10)))
+print("Square x10:", list(map(lambda a: "{:e}".format(a), duration_2_pred_10)))
 
 #data = pd.DataFrame({"Aspect Ratio": processes, "Duration (S)": duration_pred, "Type": d_type})
 #data2 = pd.DataFrame({"Aspect Ratio": processes_2, "Duration (S)": duration_2_pred, "Type": d_type_2})
