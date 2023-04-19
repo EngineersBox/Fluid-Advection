@@ -153,7 +153,6 @@ void gatherParParams() {
   }
 } //gatherParParams()
 
-
 int main(int argc, char** argv) {
   double *u; int ldu; //local advection field
   double t; //time
@@ -181,7 +180,8 @@ int main(int argc, char** argv) {
   checkHaloSize(w);
 
   ldu = N_loc+2*w;
-  u = calloc(ldu*(M_loc+2*w), sizeof(double)); assert (u != NULL);
+  u = calloc(optX ? M0 * N0 : ldu*(M_loc+2*w), sizeof(double));
+  assert(u != NULL);
   initAdvectField(M0, N0, M_loc, N_loc, &V(u,w,w), ldu);
   if (verbosity > 1)
     printAdvectField(rank, "init u", M_loc, N_loc, &V(u,w,w), ldu);
@@ -194,7 +194,7 @@ int main(int argc, char** argv) {
   else if (optW)
     parAdvectWide(r, w, u, ldu);
   else if (optX)
-    parAdvectExtra(r, u, ldu);
+	parAdvectExtra(r, u, ldu);
   else
     parAdvect(r, u, ldu);
 
@@ -214,7 +214,6 @@ int main(int argc, char** argv) {
   printLocGlobAvgs(1, "error of final field: ", 
 		   errMaxAdvectField(r, M0, N0, M_loc, N_loc, &V(u,w,w), ldu),
 		   M_loc*N_loc, M*N);
-
   free(u);
   MPI_Finalize();
   return 0;

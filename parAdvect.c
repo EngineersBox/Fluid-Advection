@@ -7,13 +7,13 @@
 #include <mpi.h>
 #include <assert.h>
 #include <memory.h>
+#include <complex.h>
 #include <math.h>
 
 #ifndef FFT_CONV_KERNEL
 #define FFT_CONV_KERNEL 1
 #endif
 #if FFT_CONV_KERNEL == 1
-#include <complex.h>
 #include <fftw3.h>
 #include <stdbool.h>
 #endif
@@ -57,6 +57,7 @@ static double cj0;
 static double cjp1;
 
 static double* laxWendroffKernel;
+static MPI_Datatype matSegType;
 
 #define initFFTConv() \
 	deltax = 1.0 / N; \
@@ -80,7 +81,9 @@ static double* laxWendroffKernel;
 	laxWendroffKernel[M_loc + 2] = ci0 * cjp1; \
 	laxWendroffKernel[(2 * M_loc) + 0] = cip1 * cjm1; \
 	laxWendroffKernel[(2 * M_loc) + 1] = cip1 * cj0; \
-	laxWendroffKernel[(2 * M_loc) + 2] = cip1 * cjp1;
+	laxWendroffKernel[(2 * M_loc) + 2] = cip1 * cjp1; \
+	MPI_Type_contiguous(M_loc * N_loc, MPI_C_DOUBLE_COMPLEX, &matSegType); \
+	MPI_Type_commit(&matSegType);
 #define cleanupFFTConv() free(laxWendroffKernel)
 #else
 #define initFFTConv() ({})
@@ -475,28 +478,28 @@ int fft(double complex *const buf, const size_t n) {
 }
 
 #if FFT_CONV_KERNEL == 1
-void repeatedSquaring(int timesteps, fftw_complex* a_complex, size_t n, size_t m) {
+void repeatedSquaring(int timesteps, fftw_complex* a_complex, size_t n) {
 	bool initialised = false;
 	int t = timesteps;
-	fftw_complex* odd_mults = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (n * m));
+	fftw_complex* odd_mults = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
 	while (t > 1) {
 		if (t & 1) {
 			if (!initialised) {
-				memcpy(odd_mults, a_complex, n * m);
+				if (rank == 0) memcpy(odd_mults, a_complex, n);
 				initialised = true;
 			} else {
-				for (size_t i = 0; i < n * m; i++) {
+				for (size_t i = 0; i < n; i++) {
 					odd_mults[i] *= a_complex[i];
 				}
 			}
 		}
-		for (size_t i = 0; i < n * m; i++) {
+		for (size_t i = 0; i < n; i++) {
 			a_complex[i] *= a_complex[i];
 		}
 		t /= 2;
 	}
 	if (initialised) {
-		for (size_t i = 0; i < n * m; i++) {
+		for (size_t i = 0; i < n; i++) {
 			a_complex[i] *= odd_mults[i];
 		}
 	}
@@ -524,30 +527,90 @@ void parAdvectExtra(int r, double *u, int ldu) {
 	//                           |
 	// [a_0] -FFT-> [F*a_0] -----+-MP--> [(F*S^T*F^-1)(F*a_0)] -EV-> [F*a_T] -IFFT-> [a_T]
 #if FFT_CONV_KERNEL == 1
-	int timesteps = 1;
-	fftw_complex* a_complex = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (M_loc * N_loc));
-	fftw_plan plan_u_f = fftw_plan_dft_r2c_2d(M_loc, N_loc, u, a_complex, FFTW_FORWARD);
-	fftw_execute(plan_u_f);
-	fftw_destroy_plan(plan_u_f);
-
-	repeatedSquaring(timesteps, a_complex, M_loc, N_loc);
-
-	fftw_complex* input_complex = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (M_loc * N_loc));
-	fftw_plan plan_lwk_f = fftw_plan_dft_r2c_2d(M_loc, N_loc, laxWendroffKernel, input_complex, FFTW_FORWARD);
-	fftw_execute(plan_lwk_f);
-	fftw_destroy_plan(plan_lwk_f);
-
-	for (size_t i = 0; i < M_loc * N_loc; i++) {
-		a_complex[i] *= input_complex[i];
+	int timesteps = r;
+	fftw_complex* a_complex = NULL;
+	if (rank == 0) {
+		a_complex = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (M_loc * N_loc));
+		assert(a_complex != NULL);
+		fftw_plan plan_u_f = fftw_plan_dft_r2c_2d(M_loc, N_loc, u, a_complex, FFTW_ESTIMATE);
+		fftw_execute(plan_u_f);
+		fftw_destroy_plan(plan_u_f);
+		printf(
+				"0 Elements [%f+i%f]\n",
+				creal(a_complex[0]), cimag(a_complex[0])
+		);
 	}
 
-	// double* result = (double*) calloc(M_loc * N_loc, sizeof(double));
-	fftw_plan plan_result = fftw_plan_dft_c2r_2d(M_loc, N_loc, a_complex, u /*result*/, FFTW_BACKWARD);
-	fftw_execute(plan_result);
-	fftw_destroy_plan(plan_result);
+	MPI_Request requests[2];
+	fftw_complex* tempSquaring = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * M_loc * N_loc);
+	memset(tempSquaring, 0, M_loc * N_loc * sizeof(*tempSquaring));
+	MPI_Scatter(
+			a_complex, 1, matSegType,
+			tempSquaring, 1, matSegType,
+			0, commHandle
+	);
+	/*printf(*/
+			/*"Elements [%f+i%f]\n",*/
+			/*creal(tempSquaring[0]), cimag(tempSquaring[0])*/
+	/*);*/
+	repeatedSquaring(timesteps, tempSquaring, M_loc * N_loc);
+	/*printf(*/
+			/*"Elements [%f+i%f]\n",*/
+			/*creal(tempSquaring[0]), cimag(tempSquaring[0])*/
+	/*);*/
+	MPI_Gather(
+		tempSquaring, 1, matSegType,
+		a_complex, 1, matSegType,
+		0, commHandle
+	);
+	fftw_free(tempSquaring);
 
-	fftw_free(a_complex);
-	fftw_free(input_complex);
+	fftw_complex* input_complex = NULL;
+	if (rank == 0) {
+		input_complex = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (M_loc * N_loc));
+		fftw_plan plan_lwk_f = fftw_plan_dft_r2c_2d(M_loc, N_loc, laxWendroffKernel, input_complex, FFTW_ESTIMATE);
+		fftw_execute(plan_lwk_f);
+		fftw_destroy_plan(plan_lwk_f);
+	}
+
+	
+	// TODO: Make parallel [DONE]
+	//for (size_t i = 0; i < M_loc * N_loc; i++) {
+	//	a_complex[i] *= input_complex[i];
+	//}
+	tempSquaring = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * M_loc * N_loc);
+	fftw_complex* tempComplex = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * M_loc * N_loc);
+	memset(tempSquaring, 0, M_loc * N_loc * sizeof(*tempSquaring));
+	memset(tempComplex, 0, M_loc * N_loc * sizeof(*tempComplex));
+	MPI_Iscatter(
+			a_complex, 1, matSegType,
+			tempSquaring, 1, matSegType,
+			0, commHandle, &requests[0]
+	);
+	MPI_Iscatter(
+			input_complex, 1, matSegType,
+			tempComplex, 1, matSegType,
+			0, commHandle, &requests[1]
+	);
+	MPI_Waitall(2, requests, NULL);
+	for (size_t i = 0; i < M_loc * N_loc; i++) {
+		tempSquaring[i] *= tempComplex[i];
+	}
+	MPI_Gather(
+		tempSquaring, 1, matSegType,
+		a_complex, 1, matSegType,
+		0, commHandle
+	);
+	fftw_free(tempSquaring);
+	fftw_free(tempComplex);
+
+	if (rank == 0) {
+		fftw_plan plan_result = fftw_plan_dft_c2r_2d(M_loc, N_loc, a_complex, u, FFTW_ESTIMATE);
+		fftw_execute(plan_result);
+		fftw_destroy_plan(plan_result);
+		fftw_free(a_complex);
+		fftw_free(input_complex);
+	}
 	cleanupFFTConv();
 #endif
 } //parAdvectExtra()
