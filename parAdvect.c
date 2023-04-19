@@ -62,7 +62,7 @@ static MPI_Datatype matSegType;
 #define initFFTConv() \
 	deltax = 1.0 / N; \
 	deltay = 1.0 / M; \
-	dt = CFL * (deltax < deltax ? : deltay); \
+	dt = CFL * (deltax < deltay ? deltax : deltay); \
 	Ux = Velx * dt / deltax; \
 	Uy = Vely * dt / deltay; \
 	cim1 = (Ux / 2.0) * (Ux + 1.0); \
@@ -481,7 +481,7 @@ int fft(double complex *const buf, const size_t n) {
 void repeatedSquaring(int timesteps, fftw_complex* a_complex, size_t n) {
 	bool initialised = false;
 	int t = timesteps;
-	fftw_complex* odd_mults = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
+	fftw_complex* odd_mults = (fftw_complex*) fftw_alloc_complex(n);
 	while (t > 1) {
 		if (t & 1) {
 			if (!initialised) {
@@ -530,9 +530,15 @@ void parAdvectExtra(int r, double *u, int ldu) {
 	int timesteps = r;
 	fftw_complex* a_complex = NULL;
 	if (rank == 0) {
-		a_complex = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (M_loc * N_loc));
+		printf("Yeah\n");
+		printf(
+				"U elements [%f, %f, %f]\n",
+				u[0], u[1], u[2]
+		);
+		a_complex = (fftw_complex*) fftw_alloc_complex(M * N);
 		assert(a_complex != NULL);
-		fftw_plan plan_u_f = fftw_plan_dft_r2c_2d(M_loc, N_loc, u, a_complex, FFTW_ESTIMATE);
+		memset(a_complex, 0, sizeof(fftw_complex) * M * N);
+		fftw_plan plan_u_f = fftw_plan_dft_r2c_2d(M, N, u, a_complex, FFTW_ESTIMATE);
 		fftw_execute(plan_u_f);
 		fftw_destroy_plan(plan_u_f);
 		printf(
@@ -541,23 +547,14 @@ void parAdvectExtra(int r, double *u, int ldu) {
 		);
 	}
 
-	MPI_Request requests[2];
-	fftw_complex* tempSquaring = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * M_loc * N_loc);
+	fftw_complex* tempSquaring = (fftw_complex*) fftw_alloc_complex(M_loc * N_loc);
 	memset(tempSquaring, 0, M_loc * N_loc * sizeof(*tempSquaring));
 	MPI_Scatter(
 			a_complex, 1, matSegType,
 			tempSquaring, 1, matSegType,
 			0, commHandle
 	);
-	/*printf(*/
-			/*"Elements [%f+i%f]\n",*/
-			/*creal(tempSquaring[0]), cimag(tempSquaring[0])*/
-	/*);*/
 	repeatedSquaring(timesteps, tempSquaring, M_loc * N_loc);
-	/*printf(*/
-			/*"Elements [%f+i%f]\n",*/
-			/*creal(tempSquaring[0]), cimag(tempSquaring[0])*/
-	/*);*/
 	MPI_Gather(
 		tempSquaring, 1, matSegType,
 		a_complex, 1, matSegType,
@@ -567,19 +564,15 @@ void parAdvectExtra(int r, double *u, int ldu) {
 
 	fftw_complex* input_complex = NULL;
 	if (rank == 0) {
-		input_complex = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (M_loc * N_loc));
-		fftw_plan plan_lwk_f = fftw_plan_dft_r2c_2d(M_loc, N_loc, laxWendroffKernel, input_complex, FFTW_ESTIMATE);
+		input_complex = (fftw_complex*) fftw_alloc_complex(M * N);
+		fftw_plan plan_lwk_f = fftw_plan_dft_r2c_2d(M, N, laxWendroffKernel, input_complex, FFTW_ESTIMATE);
 		fftw_execute(plan_lwk_f);
 		fftw_destroy_plan(plan_lwk_f);
 	}
 
-	
-	// TODO: Make parallel [DONE]
-	//for (size_t i = 0; i < M_loc * N_loc; i++) {
-	//	a_complex[i] *= input_complex[i];
-	//}
-	tempSquaring = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * M_loc * N_loc);
-	fftw_complex* tempComplex = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * M_loc * N_loc);
+	MPI_Request requests[2];	
+	tempSquaring = (fftw_complex*) fftw_alloc_complex(M_loc * N_loc);
+	fftw_complex* tempComplex = (fftw_complex*) fftw_alloc_complex(M_loc * N_loc);
 	memset(tempSquaring, 0, M_loc * N_loc * sizeof(*tempSquaring));
 	memset(tempComplex, 0, M_loc * N_loc * sizeof(*tempComplex));
 	MPI_Iscatter(
@@ -605,7 +598,7 @@ void parAdvectExtra(int r, double *u, int ldu) {
 	fftw_free(tempComplex);
 
 	if (rank == 0) {
-		fftw_plan plan_result = fftw_plan_dft_c2r_2d(M_loc, N_loc, a_complex, u, FFTW_ESTIMATE);
+		fftw_plan plan_result = fftw_plan_dft_c2r_2d(M, N, a_complex, u, FFTW_BACKWARD | FFTW_ESTIMATE);
 		fftw_execute(plan_result);
 		fftw_destroy_plan(plan_result);
 		fftw_free(a_complex);

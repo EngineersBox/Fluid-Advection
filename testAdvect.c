@@ -99,8 +99,12 @@ static void printLocGlobAvgs(int isMax, char *name, double total, int nlVals,
     printf("%d: local avg %s %s is %.3e\n", rank, 
 	   isMax? "max": "avg", name, 
 	   isMax? total: (nlVals==0? 0.0: total / nlVals));
-  MPI_Reduce(&total, v, 1, MPI_DOUBLE,isMax? MPI_MAX: MPI_SUM, 0, 
+  if (optX) {
+	v[0] = total;
+  } else {
+	  MPI_Reduce(&total, v, 1, MPI_DOUBLE,isMax? MPI_MAX: MPI_SUM, 0, 
 	     MPI_COMM_WORLD);
+  }
   if (rank == 0)
     printf("%s %s %.3e\n", isMax? "Max": "Avg", name, 
 	   isMax? v[0]: v[0] / ngVals);
