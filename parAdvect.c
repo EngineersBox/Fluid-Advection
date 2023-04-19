@@ -7,12 +7,15 @@
 #include <mpi.h>
 #include <assert.h>
 #include <memory.h>
-#include <complex.h>
 #include <math.h>
 
-//#define FFT_CONV_KERNEL 0
+#ifndef FFT_CONV_KERNEL
+#define FFT_CONV_KERNEL 1
+#endif
 #if FFT_CONV_KERNEL == 1
+#include <complex.h>
 #include <fftw3.h>
+#include <stdbool.h>
 #endif
 
 #include "serAdvect.h"
@@ -32,6 +35,57 @@ static int topProc, botProc, leftProc, rightProc; // Von-Neumann neighbourhood p
 static int topLeftProc, topRightProc, botLeftProc, botRightProc; // Corner neighbourhood processes
 static MPI_Comm comm, commHandle; // Communication handlers for main and Cartesian configurations
 static MPI_Datatype rowType, colType, cornerType; // Data types for exchanges
+
+#if FFT_CONV_KERNEL == 1
+// FFT Optimisation Variables
+static const double Velx = 1.0;
+static const double Vely = 1.0;
+static const double CFL = 0.25;
+static double deltax;
+static double deltay;
+static double dt;
+
+static double Ux;
+static double Uy;
+
+// N2 Coefficients
+static double cim1;
+static double ci0;
+static double cip1;
+static double cjm1;
+static double cj0;
+static double cjp1;
+
+static double* laxWendroffKernel;
+
+#define initFFTConv() \
+	deltax = 1.0 / N; \
+	deltay = 1.0 / M; \
+	dt = CFL * (deltax < deltax ? : deltay); \
+	Ux = Velx * dt / deltax; \
+	Uy = Vely * dt / deltay; \
+	cim1 = (Ux / 2.0) * (Ux + 1.0); \
+	ci0 = 1.0 - (Ux * Ux); \
+	cip1 = (Ux / 2.0) * (Ux - 1.0); \
+	cjm1 = (Uy / 2.0) * (Uy + 1.0); \
+	cj0 = 1.0 - (Uy * Uy); \
+	cjp1 = (Uy / 2.0) * (Uy - 1.0); \
+	laxWendroffKernel = (double*) calloc(N_loc * M_loc, sizeof(*laxWendroffKernel)); \
+	memset(laxWendroffKernel, 0, N_loc * N_loc * sizeof(*laxWendroffKernel)); \
+	laxWendroffKernel[0] = cim1 * cjm1; \
+	laxWendroffKernel[1] = cim1 * cj0; \
+	laxWendroffKernel[2] = cim1 * cjp1; \
+	laxWendroffKernel[M_loc + 0] = ci0 * cjm1; \
+	laxWendroffKernel[M_loc + 1] = ci0 * cj0; \
+	laxWendroffKernel[M_loc + 2] = ci0 * cjp1; \
+	laxWendroffKernel[(2 * M_loc) + 0] = cip1 * cjm1; \
+	laxWendroffKernel[(2 * M_loc) + 1] = cip1 * cj0; \
+	laxWendroffKernel[(2 * M_loc) + 2] = cip1 * cjp1;
+#define cleanupFFTConv() free(laxWendroffKernel)
+#else
+#define initFFTConv() ({})
+#define cleanupFFTConv() ({})
+#endif
 
 // Neighbourhood rank caluclation macros
 
@@ -102,6 +156,7 @@ void initParParams(int M_, int N_, int P_, int Q_, int verb) {
 	commHandle = comm;
 #endif
 	calculateNeighbours();
+	initFFTConv();
 } //initParParams()
 
 
@@ -419,6 +474,36 @@ int fft(double complex *const buf, const size_t n) {
 	return 0;
 }
 
+#if FFT_CONV_KERNEL == 1
+void repeatedSquaring(int timesteps, fftw_complex* a_complex, size_t n, size_t m) {
+	bool initialised = false;
+	int t = timesteps;
+	fftw_complex* odd_mults = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (n * m));
+	while (t > 1) {
+		if (t & 1) {
+			if (!initialised) {
+				memcpy(odd_mults, a_complex, n * m);
+				initialised = true;
+			} else {
+				for (size_t i = 0; i < n * m; i++) {
+					odd_mults[i] *= a_complex[i];
+				}
+			}
+		}
+		for (size_t i = 0; i < n * m; i++) {
+			a_complex[i] *= a_complex[i];
+		}
+		t /= 2;
+	}
+	if (initialised) {
+		for (size_t i = 0; i < n * m; i++) {
+			a_complex[i] *= odd_mults[i];
+		}
+	}
+	fftw_free(odd_mults);
+}
+#endif
+
 // extra optimization variant
 void parAdvectExtra(int r, double *u, int ldu) {
 	// -------------------------
@@ -439,15 +524,30 @@ void parAdvectExtra(int r, double *u, int ldu) {
 	//                           |
 	// [a_0] -FFT-> [F*a_0] -----+-MP--> [(F*S^T*F^-1)(F*a_0)] -EV-> [F*a_T] -IFFT-> [a_T]
 #if FFT_CONV_KERNEL == 1
-	fftw_complex* in;
-	fftw_complex* out;
-	fftw_plan p;
-	in = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (M_loc * N_loc));
-	out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (M_loc * N_loc));
-	p = fftw_plan_dft_1d(M_loc * N_loc, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
-	fftw_execute(p);
-	fftw_destroy_plan(p);
-	fftw_free(in);
-	fftw_free(out);
+	int timesteps = 1;
+	fftw_complex* a_complex = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (M_loc * N_loc));
+	fftw_plan plan_u_f = fftw_plan_dft_r2c_2d(M_loc, N_loc, u, a_complex, FFTW_FORWARD);
+	fftw_execute(plan_u_f);
+	fftw_destroy_plan(plan_u_f);
+
+	repeatedSquaring(timesteps, a_complex, M_loc, N_loc);
+
+	fftw_complex* input_complex = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (M_loc * N_loc));
+	fftw_plan plan_lwk_f = fftw_plan_dft_r2c_2d(M_loc, N_loc, laxWendroffKernel, input_complex, FFTW_FORWARD);
+	fftw_execute(plan_lwk_f);
+	fftw_destroy_plan(plan_lwk_f);
+
+	for (size_t i = 0; i < M_loc * N_loc; i++) {
+		a_complex[i] *= input_complex[i];
+	}
+
+	// double* result = (double*) calloc(M_loc * N_loc, sizeof(double));
+	fftw_plan plan_result = fftw_plan_dft_c2r_2d(M_loc, N_loc, a_complex, u /*result*/, FFTW_BACKWARD);
+	fftw_execute(plan_result);
+	fftw_destroy_plan(plan_result);
+
+	fftw_free(a_complex);
+	fftw_free(input_complex);
+	cleanupFFTConv();
 #endif
 } //parAdvectExtra()
